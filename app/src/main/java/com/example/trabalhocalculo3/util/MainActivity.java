@@ -1,4 +1,4 @@
-package com.example.trabalhocalculo3;
+package com.example.trabalhocalculo3.util;
 
 import static com.example.trabalhocalculo3.mathMotor.ConvertUnits.convertDensity;
 import static com.example.trabalhocalculo3.mathMotor.ConvertUnits.convertVolume;
@@ -16,13 +16,12 @@ import androidx.activity.result.ActivityResultLauncher;
 import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.appcompat.app.AppCompatActivity;
 import android.net.Uri;
-import android.widget.Toast;
 
+import com.example.trabalhocalculo3.R;
 import com.example.trabalhocalculo3.mathMotor.MassCalculator;
 import com.example.trabalhocalculo3.mathMotor.VolumeCalculator;
 import com.example.trabalhocalculo3.mesh.Mesh3D;
 import com.example.trabalhocalculo3.mesh.MeshImporter;
-import com.example.trabalhocalculo3.util.Unit;
 
 import java.io.InputStream;
 import java.util.concurrent.ExecutorService;
