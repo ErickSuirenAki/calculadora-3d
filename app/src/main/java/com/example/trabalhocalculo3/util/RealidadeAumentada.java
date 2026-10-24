@@ -14,13 +14,27 @@ import android.view.MotionEvent;
 import android.widget.FrameLayout;
 import android.widget.TextView;
 import android.widget.Toast;
-import com.google.ar.core.Plane;
+import android.widget.Button;
+import android.widget.LinearLayout;
+import android.widget.SeekBar;
+import android.net.Uri;
+import android.view.ViewConfiguration;
+import androidx.activity.result.ActivityResultLauncher;
+import androidx.activity.result.contract.ActivityResultContracts;
+import com.example.trabalhocalculo3.mesh.Mesh3D;
+import com.example.trabalhocalculo3.mesh.MeshImporter;
+import java.io.InputStream;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.app.ActivityCompat;
 
 import com.google.ar.core.Anchor;
 import com.google.ar.core.ArCoreApk;
 import com.google.ar.core.Camera;
+import com.google.ar.core.CameraConfig;
+import com.google.ar.core.CameraConfigFilter;
+import java.util.EnumSet;
 import com.google.ar.core.Config;
 import com.google.ar.core.Coordinates2d;
 import com.google.ar.core.Frame;
@@ -46,6 +60,73 @@ public class RealidadeAumentada extends AppCompatActivity {
     private ArRenderer renderer;
     private boolean installRequested = true;
 
+    private final ExecutorService importer = Executors.newSingleThreadExecutor();
+    private TextView instructions;
+    private TextView trackingStatus;
+    private Button importButton;
+    private boolean hasModel;
+    private boolean importing;
+    private float touchStartX, touchStartY;
+    private boolean moved;
+    private SeekBar sizeControl, rotationControl;
+    private final ActivityResultLauncher<String[]> openStl = registerForActivityResult(
+            new ActivityResultContracts.OpenDocument(), uri -> {
+                if (uri == null) return;
+                String[] units = {"Milímetros (mm)", "Centímetros (cm)", "Metros (m)"};
+                new androidx.appcompat.app.AlertDialog.Builder(this)
+                        .setTitle("Unidade do arquivo STL")
+                        .setSingleChoiceItems(units, 0, null)
+                        .setPositiveButton("Importar", (dialog, which) -> {
+                            int selected = ((androidx.appcompat.app.AlertDialog) dialog)
+                                    .getListView().getCheckedItemPosition();
+                            importModel(uri, new double[]{0.001, 0.01, 1.0}[selected]);
+                        })
+                        .setNegativeButton("Cancelar", null).show();
+            });
+
+    private void importModel(Uri uri, double metersPerUnit) {
+        importing = true;
+        importButton.setEnabled(false);
+        instructions.setText("Importando STL…");
+        importer.execute(() -> {
+            try (InputStream input = getContentResolver().openInputStream(uri)) {
+                Mesh3D mesh = MeshImporter.importStl(input);
+                float[] vertices = mesh.getPositions();
+                if (vertices == null || vertices.length == 0 || vertices.length % 9 != 0)
+                    throw new IllegalArgumentException("Arquivo STL vazio ou inválido.");
+                float[] center = mesh.getCenter();
+                float minZ = Float.POSITIVE_INFINITY;
+                for (int i = 2; i < vertices.length; i += 3) minZ = Math.min(minZ, vertices[i]);
+                float[] positions = new float[vertices.length];
+                for (int i = 0; i < vertices.length; i += 3) {
+                    positions[i] = (float) ((vertices[i] - center[0]) * metersPerUnit);
+                    positions[i + 1] = (float) ((vertices[i + 2] - minZ) * metersPerUnit);
+                    positions[i + 2] = (float) (-(vertices[i + 1] - center[1]) * metersPerUnit);
+                }
+                if (!(mesh.getBoundingRadius() > 0))
+                    throw new IllegalArgumentException("O modelo não possui dimensões válidas.");
+                FloatBuffer data = ArRenderer.buffer(positions);
+                runOnUiThread(() -> {
+                    if (isFinishing() || isDestroyed()) return;
+                    surfaceView.queueEvent(() -> renderer.setModel(data, positions.length / 3));
+                    hasModel = true;
+                    importing = false;
+                    importButton.setEnabled(true);
+                    sizeControl.setProgress(100);
+                    rotationControl.setProgress(0);
+                    instructions.setText("STL importado em tamanho real. Mova o celular e toque em uma superfície para posicionar.");
+                });
+            } catch (Exception e) {
+                runOnUiThread(() -> {
+                    if (isFinishing() || isDestroyed()) return;
+                    importing = false;
+                    importButton.setEnabled(true);
+                    instructions.setText("Não foi possível importar o STL. " + e.getMessage());
+                });
+            }
+        });
+    }
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -54,18 +135,21 @@ public class RealidadeAumentada extends AppCompatActivity {
 
         surfaceView = new GLSurfaceView(this);
         surfaceView.setEGLContextClientVersion(3);
+        surfaceView.setPreserveEGLContextOnPause(true);
 
         renderer = new ArRenderer(this);
+        renderer.statusListener = message -> runOnUiThread(() -> {
+            if (!isFinishing() && !isDestroyed()) trackingStatus.setText(message);
+        });
         surfaceView.setRenderer(renderer);
         surfaceView.setRenderMode(
                 GLSurfaceView.RENDERMODE_CONTINUOUSLY);
 
         root.addView(surfaceView);
 
-        TextView instructions = new TextView(this);
+        instructions = new TextView(this);
         instructions.setText(
-                "Mova o celular para detectar uma superfície.\n"
-                        + "Toque na superfície para posicionar o cilindro."
+                "Importe um arquivo STL para visualizar no ambiente."
         );
         instructions.setTextColor(Color.WHITE);
         instructions.setTextSize(16);
@@ -81,11 +165,84 @@ public class RealidadeAumentada extends AppCompatActivity {
                 );
         root.addView(instructions, params);
 
+        LinearLayout controls = new LinearLayout(this);
+        controls.setOrientation(LinearLayout.VERTICAL);
+        controls.setPadding(20, 8, 20, 12);
+        controls.setBackgroundColor(0xCC000000);
+        importButton = new Button(this);
+        importButton.setText("Importar STL");
+        importButton.setOnClickListener(v -> openStl.launch(new String[]{"*/*"}));
+        trackingStatus = new TextView(this);
+        trackingStatus.setTextColor(Color.WHITE);
+        trackingStatus.setText("Iniciando rastreamento da câmera…");
+        trackingStatus.setPadding(8, 8, 8, 8);
+        controls.addView(trackingStatus);
+        controls.addView(importButton);
+        TextView sizeLabel = new TextView(this);
+        sizeLabel.setTextColor(Color.WHITE);
+        sizeLabel.setText("Tamanho: 100% (escala real)");
+        controls.addView(sizeLabel);
+        sizeControl = new SeekBar(this);
+        sizeControl.setMax(200);
+        sizeControl.setProgress(100);
+        controls.addView(sizeControl);
+        TextView rotationLabel = new TextView(this);
+        rotationLabel.setTextColor(Color.WHITE);
+        rotationLabel.setText("Rotação: 0°");
+        controls.addView(rotationLabel);
+        rotationControl = new SeekBar(this);
+        rotationControl.setMax(360);
+        controls.addView(rotationControl);
+        sizeControl.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            public void onProgressChanged(SeekBar bar, int value, boolean user) {
+                float scale = (float) Math.pow(10, (value - 100) / 100.0);
+                renderer.modelScale = scale;
+                sizeLabel.setText(String.format(java.util.Locale.getDefault(), "Tamanho: %.0f%%", scale * 100));
+            }
+            public void onStartTrackingTouch(SeekBar bar) {}
+            public void onStopTrackingTouch(SeekBar bar) {}
+        });
+        rotationControl.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            public void onProgressChanged(SeekBar bar, int value, boolean user) {
+                renderer.modelRotation = value;
+                rotationLabel.setText("Rotação: " + value + "°");
+            }
+            public void onStartTrackingTouch(SeekBar bar) {}
+            public void onStopTrackingTouch(SeekBar bar) {}
+        });
+        root.addView(controls, new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM));
+        root.setOnApplyWindowInsetsListener((v, insets) -> {
+            v.setPadding(insets.getSystemWindowInsetLeft(), insets.getSystemWindowInsetTop(),
+                    insets.getSystemWindowInsetRight(), insets.getSystemWindowInsetBottom());
+            return insets;
+        });
         setContentView(root);
 
         surfaceView.setOnTouchListener((view, event) -> {
-            if (event.getAction() == MotionEvent.ACTION_UP) {
-                renderer.onTap(event.getX(), event.getY());
+            switch (event.getActionMasked()) {
+                case MotionEvent.ACTION_DOWN:
+                    touchStartX = event.getX();
+                    touchStartY = event.getY();
+                    moved = false;
+                    break;
+                case MotionEvent.ACTION_POINTER_DOWN:
+                    moved = true;
+                    break;
+                case MotionEvent.ACTION_MOVE:
+                    if (Math.hypot(event.getX() - touchStartX, event.getY() - touchStartY)
+                            > ViewConfiguration.get(this).getScaledTouchSlop()) moved = true;
+                    break;
+                case MotionEvent.ACTION_UP:
+                    if (!moved && hasModel && !importing) {
+                        float x = event.getX(), y = event.getY();
+                        surfaceView.queueEvent(() -> renderer.onTap(x, y));
+                    }
+                    view.performClick();
+                    break;
+                case MotionEvent.ACTION_CANCEL:
+                    moved = true;
+                    break;
             }
             return true;
         });
@@ -107,6 +264,10 @@ public class RealidadeAumentada extends AppCompatActivity {
             return;
         }
 
+        startSession();
+    }
+
+    private void startSession() {
         try {
             if (session == null) {
                 ArCoreApk.InstallStatus status =
@@ -119,13 +280,20 @@ public class RealidadeAumentada extends AppCompatActivity {
                 }
 
                 session = new Session(this);
+                CameraConfigFilter cameraFilter = new CameraConfigFilter(session);
+                cameraFilter.setTargetFps(EnumSet.of(CameraConfig.TargetFps.TARGET_FPS_30));
+                List<CameraConfig> cameraConfigs = session.getSupportedCameraConfigs(cameraFilter);
+                if (!cameraConfigs.isEmpty()) session.setCameraConfig(cameraConfigs.get(0));
 
                 Config config = new Config(session);
 
                 config.setPlaneFindingMode(
-                        Config.PlaneFindingMode.HORIZONTAL);
+                        Config.PlaneFindingMode.HORIZONTAL_AND_VERTICAL);
 
-                // Desativa a API de profundidade para este teste.
+                config.setFocusMode(Config.FocusMode.AUTO);
+                config.setLightEstimationMode(Config.LightEstimationMode.DISABLED);
+                config.setInstantPlacementMode(Config.InstantPlacementMode.LOCAL_Y_UP);
+
                 config.setDepthMode(
                         Config.DepthMode.DISABLED
                 );
@@ -136,6 +304,8 @@ public class RealidadeAumentada extends AppCompatActivity {
             }
 
             session.resume();
+            renderer.cameraFailed = false;
+            surfaceView.queueEvent(renderer::onSessionResumed);
             surfaceView.onResume();
 
         } catch (Exception e) {
@@ -159,6 +329,7 @@ public class RealidadeAumentada extends AppCompatActivity {
 
     @Override
     protected void onDestroy() {
+        importer.shutdownNow();
         if (session != null) {
             session.close();
             session = null;
@@ -184,8 +355,9 @@ public class RealidadeAumentada extends AppCompatActivity {
                         Toast.LENGTH_LONG
                 ).show();
                 finish();
+            } else if (session == null) {
+                startSession();
             }
-            // Se concedida, o Android já chama onResume() sozinho.
         }
     }
 
@@ -193,7 +365,7 @@ public class RealidadeAumentada extends AppCompatActivity {
             implements GLSurfaceView.Renderer {
 
         private final Activity activity;
-        private Session session;
+        private volatile Session session;
         private int cameraTexture = -1;
         private boolean textureSet = false;
         private int cameraProgram;
@@ -206,9 +378,49 @@ public class RealidadeAumentada extends AppCompatActivity {
 
         private FloatBuffer quadBuffer;
         private FloatBuffer texBuffer;
-        private FloatBuffer cylinderBuffer;
+        private FloatBuffer modelBuffer;
+        volatile float modelScale = 1f;
+        volatile float modelRotation;
+        private volatile boolean cameraFailed;
 
-        private int cylinderVertexCount;
+        interface StatusListener { void onStatus(String message); }
+        private StatusListener statusListener;
+        private String lastStatus;
+
+        private void reportStatus(String message) {
+            if (message.equals(lastStatus)) return;
+            lastStatus = message;
+            android.util.Log.i("AR_TRACKING", message);
+            if (statusListener != null) statusListener.onStatus(message);
+        }
+
+        void onSessionResumed() {
+            textureSet = false;
+            geometryChanged = true;
+            tapPending = false;
+            lastStatus = null;
+        }
+
+        private String trackingMessage(Camera camera) {
+            if (camera.getTrackingState() == TrackingState.STOPPED)
+                return "Rastreamento encerrado. Saia e abra a realidade aumentada novamente.";
+            switch (camera.getTrackingFailureReason()) {
+                case INSUFFICIENT_LIGHT:
+                    return "Pouca luz. Aponte para uma área mais iluminada e confira se a câmera está descoberta.";
+                case INSUFFICIENT_FEATURES:
+                    return "Faltam detalhes visuais. Aponte para uma mesa com objetos; evite paredes lisas e reflexos.";
+                case EXCESSIVE_MOTION:
+                    return "Movimento rápido. Mova o celular devagar, deslocando-o um pouco para os lados.";
+                case CAMERA_UNAVAILABLE:
+                    return "Câmera indisponível. Feche outros aplicativos que usam a câmera.";
+                case BAD_STATE:
+                    return "Falha interna do rastreamento. Saia e abra a realidade aumentada novamente.";
+                default:
+                    return "Inicializando posição. Aponte para uma área iluminada com detalhes e mova o celular para os lados.";
+            }
+        }
+
+        private int modelVertexCount;
         private Anchor anchor;
 
         private int surfaceWidth;
@@ -246,6 +458,14 @@ public class RealidadeAumentada extends AppCompatActivity {
             this.geometryChanged = true;
         }
 
+        void setModel(FloatBuffer data, int count) {
+            modelBuffer = data;
+            modelVertexCount = count;
+            tapPending = false;
+            if (anchor != null) anchor.detach();
+            anchor = null;
+        }
+
         void onTap(float x, float y) {
             android.util.Log.d("AR_TAP", "onTap x=" + x + " y=" + y);
             tapX = x;
@@ -280,12 +500,16 @@ public class RealidadeAumentada extends AppCompatActivity {
                     "#version 300 es\n"
                             + "in vec3 aPosition;\n"
                             + "uniform mat4 uMVP;\n"
-                            + "void main(){gl_Position=uMVP*vec4(aPosition,1.0);}",
+                            + "out vec3 vPosition;\n"
+                            + "void main(){vPosition=aPosition;gl_Position=uMVP*vec4(aPosition,1.0);}",
 
                     "#version 300 es\n"
                             + "precision mediump float;\n"
                             + "out vec4 fragColor;\n"
-                            + "void main(){fragColor=vec4(0.1,0.8,0.3,1.0);}"
+                            + "in vec3 vPosition;\n"
+                            + "void main(){vec3 n=normalize(cross(dFdx(vPosition),dFdy(vPosition)));"
+                            + "float light=0.35+0.65*abs(dot(n,normalize(vec3(0.3,0.8,0.5))));"
+                            + "fragColor=vec4(vec3(0.1,0.8,0.3)*light,1.0);}"
             );
 
             cameraPosition = GLES30.glGetAttribLocation(
@@ -301,9 +525,7 @@ public class RealidadeAumentada extends AppCompatActivity {
             quadBuffer = buffer(QUAD);
             texBuffer = buffer(TEX);
 
-            float[] cyl = createCylinder();
-            cylinderBuffer = buffer(cyl);
-            cylinderVertexCount = cyl.length / 3;
+
 
             int[] textures = new int[1];
             GLES30.glGenTextures(1, textures, 0);
@@ -322,7 +544,6 @@ public class RealidadeAumentada extends AppCompatActivity {
                     GLES30.GL_TEXTURE_MAG_FILTER,
                     GLES30.GL_LINEAR);
 
-            // Nova textura: precisa ser associada à sessão de novo.
             textureSet = false;
 
             GLES30.glClearColor(0, 0, 0, 1);
@@ -348,7 +569,7 @@ public class RealidadeAumentada extends AppCompatActivity {
             );
 
             Session currentSession = session;
-            if (currentSession == null) {
+            if (currentSession == null || cameraFailed) {
                 return;
             }
 
@@ -370,20 +591,27 @@ public class RealidadeAumentada extends AppCompatActivity {
 
                 Frame frame = currentSession.update();
                 Camera camera = frame.getCamera();
-                android.util.Log.d("AR_PLANES", "Planos: "
-                        + currentSession.getAllTrackables(Plane.class).size()
-                        + " | Tracking: " + camera.getTrackingState());
+
 
 
                 drawCamera(frame);
+                if (camera.getTrackingState() == TrackingState.TRACKING) {
+                    reportStatus(anchor == null
+                            ? "Rastreamento pronto. Toque na imagem para posicionar o STL."
+                            : "Objeto posicionado. Toque para mover; use os controles para ajustar.");
+                } else {
+                    reportStatus(trackingMessage(camera));
+                }
 
                 if (tapPending) {
                     android.util.Log.d("AR_TAP", "Toque pendente. Tracking = "
                             + camera.getTrackingState());
 
-                    if (camera.getTrackingState() == TrackingState.TRACKING) {
-                        tapPending = false;
+                    tapPending = false;
+                    if (camera.getTrackingState() == TrackingState.TRACKING && modelBuffer != null) {
                         placeAnchor(frame);
+                    } else {
+                        showMessage(trackingMessage(camera));
                     }
                 }
 
@@ -393,15 +621,17 @@ public class RealidadeAumentada extends AppCompatActivity {
 
                 if (anchor != null
                         && anchor.getTrackingState() == TrackingState.TRACKING) {
-                    drawCylinder(frame);
+                    drawModel(frame);
                 }
 
             } catch (CameraNotAvailableException e) {
+                cameraFailed = true;
                 android.util.Log.e("Calcula3D",
                         "Câmera indisponível", e);
                 showMessage("Câmera indisponível. Reinicie a realidade aumentada.");
 
             } catch (Exception e) {
+                reportStatus("Falha na RA: " + e.getClass().getSimpleName() + ": " + e.getMessage());
                 android.util.Log.e("Calcula3D",
                         "Erro durante a renderização da RA", e);
             }
@@ -411,14 +641,14 @@ public class RealidadeAumentada extends AppCompatActivity {
             GLES30.glDisable(GLES30.GL_DEPTH_TEST);
             GLES30.glUseProgram(cameraProgram);
 
-            FloatBuffer input = buffer(QUAD);
-            FloatBuffer output = buffer(new float[8]);
+            quadBuffer.position(0);
+            texBuffer.position(0);
 
             frame.transformCoordinates2d(
                     Coordinates2d.OPENGL_NORMALIZED_DEVICE_COORDINATES,
-                    input,
+                    quadBuffer,
                     Coordinates2d.TEXTURE_NORMALIZED,
-                    output);
+                    texBuffer);
 
             GLES30.glEnableVertexAttribArray(cameraPosition);
             GLES30.glVertexAttribPointer(
@@ -428,7 +658,7 @@ public class RealidadeAumentada extends AppCompatActivity {
             GLES30.glEnableVertexAttribArray(cameraTexCoord);
             GLES30.glVertexAttribPointer(
                     cameraTexCoord, 2, GLES30.GL_FLOAT,
-                    false, 0, output);
+                    false, 0, texBuffer);
 
             GLES30.glActiveTexture(GLES30.GL_TEXTURE0);
             GLES30.glBindTexture(
@@ -458,19 +688,24 @@ public class RealidadeAumentada extends AppCompatActivity {
                 if (plane.getTrackingState() == TrackingState.TRACKING
                         && plane.isPoseInPolygon(hit.getHitPose())) {
 
-                    if (anchor != null) {
-                        anchor.detach();
-                    }
-
-                    anchor = hit.createAnchor();
-                    showMessage("Cilindro posicionado!");
+                    Anchor nextAnchor = hit.createAnchor();
+                    if (anchor != null) anchor.detach();
+                    anchor = nextAnchor;
+                    showMessage("Objeto posicionado! Toque em outra superfície para mover.");
                     return;
                 }
             }
 
-            showMessage(
-                    "Superfície não detectada. Mova o celular lentamente sobre uma mesa."
-            );
+            List<HitResult> approximateHits = frame.hitTestInstantPlacement(tapX, tapY, 1.0f);
+            for (HitResult hit : approximateHits) {
+                if (hit.getTrackable().getTrackingState() != TrackingState.TRACKING) continue;
+                Anchor nextAnchor = hit.createAnchor();
+                if (anchor != null) anchor.detach();
+                anchor = nextAnchor;
+                showMessage("Objeto posicionado com distância aproximada. A posição pode se ajustar ao ambiente.");
+                return;
+            }
+            showMessage("Não foi possível posicionar neste ponto. Aponte para uma área com detalhes e toque novamente.");
         }
 
         private void showMessage(String message) {
@@ -483,8 +718,10 @@ public class RealidadeAumentada extends AppCompatActivity {
             );
         }
 
-        private void drawCylinder(Frame frame) {
+        private void drawModel(Frame frame) {
             anchor.getPose().toMatrix(model, 0);
+            Matrix.rotateM(model, 0, modelRotation, 0, 1, 0);
+            Matrix.scaleM(model, 0, modelScale, modelScale, modelScale);
 
             frame.getCamera().getViewMatrix(
                     viewMatrix, 0);
@@ -504,11 +741,11 @@ public class RealidadeAumentada extends AppCompatActivity {
             GLES30.glEnableVertexAttribArray(objectPosition);
             GLES30.glVertexAttribPointer(
                     objectPosition, 3, GLES30.GL_FLOAT,
-                    false, 0, cylinderBuffer);
+                    false, 0, modelBuffer);
 
             GLES30.glDrawArrays(
                     GLES30.GL_TRIANGLES, 0,
-                    cylinderVertexCount);
+                    modelVertexCount);
 
             GLES30.glDisableVertexAttribArray(objectPosition);
         }
@@ -574,56 +811,5 @@ public class RealidadeAumentada extends AppCompatActivity {
             return shader;
         }
 
-        private static float[] createCylinder() {
-            java.util.ArrayList<Float> vertices =
-                    new java.util.ArrayList<>();
-
-            int segments = 32;
-            float radius = 0.08f;
-            float height = 0.18f;
-
-            for (int i = 0; i < segments; i++) {
-                double a1 = 2.0 * Math.PI * i / segments;
-                double a2 = 2.0 * Math.PI * (i + 1) / segments;
-
-                float x1 = (float) (radius * Math.cos(a1));
-                float z1 = (float) (radius * Math.sin(a1));
-                float x2 = (float) (radius * Math.cos(a2));
-                float z2 = (float) (radius * Math.sin(a2));
-
-                // Lateral
-                addTriangle(vertices,
-                        x1, 0, z1, x2, 0, z2, x2, height, z2);
-                addTriangle(vertices,
-                        x1, 0, z1, x2, height, z2, x1, height, z1);
-
-                // Base
-                addTriangle(vertices,
-                        0, 0, 0, x2, 0, z2, x1, 0, z1);
-
-                // Tampa
-                addTriangle(vertices,
-                        0, height, 0,
-                        x1, height, z1,
-                        x2, height, z2);
-            }
-
-            float[] result = new float[vertices.size()];
-            for (int i = 0; i < vertices.size(); i++) {
-                result[i] = vertices.get(i);
-            }
-            return result;
-        }
-
-        private static void addTriangle(
-                java.util.ArrayList<Float> out,
-                float x1, float y1, float z1,
-                float x2, float y2, float z2,
-                float x3, float y3, float z3) {
-
-            out.add(x1); out.add(y1); out.add(z1);
-            out.add(x2); out.add(y2); out.add(z2);
-            out.add(x3); out.add(y3); out.add(z3);
-        }
     }
 }
