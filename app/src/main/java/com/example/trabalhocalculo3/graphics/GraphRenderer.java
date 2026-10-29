@@ -23,23 +23,31 @@ public class GraphRenderer implements GLSurfaceView.Renderer {
 
     private int vertexCount;
 
-    // Ângulo de rotação do objeto
-    private float rotationAngle = 0.0f;
+    // Rotação controlada pelo usuário.
+    private volatile float rotationX = 0.0f;
+    private volatile float rotationY = 0.0f;
+
+    // Zoom controlado pelo usuário.
+    private volatile float zoomFactor = 1.0f;
+
+    // Limites do zoom.
+    private static final float MIN_ZOOM = 0.3f;
+    private static final float MAX_ZOOM = 4.0f;
 
     private Mesh3D mesh;
 
     private boolean drawLog = false;
 
-    // Matriz final enviada para o shader
+    // Matriz final enviada para o shader.
     private final float[] mvpMatrix = new float[16];
 
-    // Matriz de projeção
+    // Matriz de projeção.
     private final float[] projectionMatrix = new float[16];
 
-    // Matriz da câmera
+    // Matriz da câmera.
     private final float[] viewMatrix = new float[16];
 
-    // Matriz do objeto
+    // Matriz do objeto.
     private final float[] modelMatrix = new float[16];
 
     private final String vertexShaderCode =
@@ -62,9 +70,18 @@ public class GraphRenderer implements GLSurfaceView.Renderer {
             "    fragColor = vec4(0.2, 0.7, 1.0, 1.0);\n" +
             "}";
 
+    /*
+     * =========================================================
+     * RECEBE A MALHA 3D
+     * =========================================================
+     */
+
     public void setMesh(Mesh3D mesh) {
 
         this.mesh = mesh;
+
+        // Restaura os controles ao carregar outro objeto.
+        resetCamera();
 
         if (mesh == null) {
             vertexCount = 0;
@@ -81,6 +98,60 @@ public class GraphRenderer implements GLSurfaceView.Renderer {
         );
     }
 
+    /*
+     * =========================================================
+     * CONTROLES DA VISUALIZAÇÃO
+     * =========================================================
+     */
+
+    /**
+     * Controla a rotação manual do objeto.
+     *
+     * deltaX: movimento horizontal do dedo.
+     * deltaY: movimento vertical do dedo.
+     */
+    public void rotateBy(float deltaX, float deltaY) {
+
+        rotationY += deltaX;
+        rotationX += deltaY;
+    }
+
+    /**
+     * Aplica o zoom recebido do gesto de pinça.
+     *
+     * scaleFactor maior que 1: aproxima.
+     * scaleFactor menor que 1: afasta.
+     */
+    public void zoomBy(float scaleFactor) {
+
+        if (scaleFactor <= 0.0f) {
+            return;
+        }
+
+        float newZoom = zoomFactor * scaleFactor;
+
+        zoomFactor = Math.max(
+                MIN_ZOOM,
+                Math.min(MAX_ZOOM, newZoom)
+        );
+    }
+
+    /**
+     * Restaura a rotação e o zoom iniciais.
+     */
+    public void resetCamera() {
+
+        rotationX = 0.0f;
+        rotationY = 0.0f;
+        zoomFactor = 1.0f;
+    }
+
+    /*
+     * =========================================================
+     * INICIALIZAÇÃO DO OPENGL
+     * =========================================================
+     */
+
     @Override
     public void onSurfaceCreated(
             GL10 gl,
@@ -95,7 +166,6 @@ public class GraphRenderer implements GLSurfaceView.Renderer {
         );
 
         // Ativa o teste de profundidade.
-        // Isso é importante para objetos 3D.
         GLES30.glEnable(
                 GLES30.GL_DEPTH_TEST
         );
@@ -110,6 +180,24 @@ public class GraphRenderer implements GLSurfaceView.Renderer {
                 fragmentShaderCode
         );
 
+        // Interrompe a inicialização se algum shader falhar.
+        if (vertexShader == 0 || fragmentShader == 0) {
+
+            if (vertexShader != 0) {
+                GLES30.glDeleteShader(vertexShader);
+            }
+
+            if (fragmentShader != 0) {
+                GLES30.glDeleteShader(fragmentShader);
+            }
+
+            Log.e(TAG, "Não foi possível compilar os shaders.");
+
+            shaderProgram = 0;
+
+            return;
+        }
+
         shaderProgram = GLES30.glCreateProgram();
 
         GLES30.glAttachShader(
@@ -122,9 +210,11 @@ public class GraphRenderer implements GLSurfaceView.Renderer {
                 fragmentShader
         );
 
-        GLES30.glLinkProgram(
-                shaderProgram
-        );
+        GLES30.glLinkProgram(shaderProgram);
+
+        // Os shaders já foram anexados ao programa.
+        GLES30.glDeleteShader(vertexShader);
+        GLES30.glDeleteShader(fragmentShader);
 
         int[] linkStatus = new int[1];
 
@@ -145,16 +235,14 @@ public class GraphRenderer implements GLSurfaceView.Renderer {
                             )
             );
 
-            GLES30.glDeleteProgram(
-                    shaderProgram
-            );
+            GLES30.glDeleteProgram(shaderProgram);
 
             shaderProgram = 0;
 
             return;
         }
 
-        // Cria o VBO
+        // Cria o VBO.
         int[] buffers = new int[1];
 
         GLES30.glGenBuffers(
@@ -165,12 +253,18 @@ public class GraphRenderer implements GLSurfaceView.Renderer {
 
         vertexBufferObject = buffers[0];
 
-        // Inicializa a matriz do objeto
+        // Inicializa a matriz do objeto.
         Matrix.setIdentityM(
                 modelMatrix,
                 0
         );
     }
+
+    /*
+     * =========================================================
+     * CONFIGURAÇÃO DA CÂMERA E DA TELA
+     * =========================================================
+     */
 
     @Override
     public void onSurfaceChanged(
@@ -186,10 +280,14 @@ public class GraphRenderer implements GLSurfaceView.Renderer {
                 height
         );
 
+        if (width <= 0 || height <= 0) {
+            return;
+        }
+
         float aspectRatio =
                 (float) width / (float) height;
 
-        // Configuração da perspectiva
+        // Configuração da perspectiva.
         Matrix.perspectiveM(
                 projectionMatrix,
                 0,
@@ -199,34 +297,38 @@ public class GraphRenderer implements GLSurfaceView.Renderer {
                 100.0f
         );
 
-        // Configuração da câmera
+        // Configuração da câmera.
         Matrix.setLookAtM(
                 viewMatrix,
                 0,
 
-                // posição da câmera
+                // Posição da câmera.
                 0.0f,
                 0.0f,
                 3.0f,
 
-                // ponto para onde olha
+                // Ponto para onde olha.
                 0.0f,
                 0.0f,
                 0.0f,
 
-                // direção "para cima"
+                // Direção para cima.
                 0.0f,
                 1.0f,
                 0.0f
         );
     }
 
-    @Override
-    public void onDrawFrame(
-            GL10 gl
-    ) {
+    /*
+     * =========================================================
+     * DESENHO DO OBJETO 3D
+     * =========================================================
+     */
 
-        // Limpa tela e profundidade
+    @Override
+    public void onDrawFrame(GL10 gl) {
+
+        // Limpa a tela e o buffer de profundidade.
         GLES30.glClear(
                 GLES30.GL_COLOR_BUFFER_BIT |
                         GLES30.GL_DEPTH_BUFFER_BIT
@@ -251,48 +353,86 @@ public class GraphRenderer implements GLSurfaceView.Renderer {
             drawLog = true;
         }
 
-        float[] positions =
-                mesh.getPositions();
+        float[] positions = mesh.getPositions();
 
-        if (positions == null ||
-                positions.length == 0) {
-
+        if (positions == null || positions.length == 0) {
             return;
         }
 
         /*
          * =========================================================
-         * ROTAÇÃO DO OBJETO
+         * TRANSFORMAÇÕES DO OBJETO
          * =========================================================
          *
-         * Como o GraphSurfaceView está usando
-         * RENDERMODE_CONTINUOUSLY, este método é chamado
-         * continuamente.
-         *
-         * Portanto, aumentando o ângulo a cada frame,
-         * conseguimos criar uma animação de rotação.
+         * A rotação não é mais automática.
+         * Os ângulos são definidos pelos gestos do usuário.
          */
 
-        rotationAngle += 0.5f;
-        Matrix.setIdentityM(modelMatrix, 0);
+        Matrix.setIdentityM(
+                modelMatrix,
+                0
+        );
 
-        // Rotação do objeto
-        Matrix.rotateM(modelMatrix, 0, rotationAngle, 0.0f, 1.0f, 0.0f);
+        // Rotação horizontal.
+        Matrix.rotateM(
+                modelMatrix,
+                0,
+                rotationY,
+                0.0f,
+                1.0f,
+                0.0f
+        );
 
-        // Correção de orientação para OpenGL
-        Matrix.rotateM(modelMatrix, 0, -90.0f, 1.0f, 0.0f, 0.0f);
+        // Rotação vertical.
+        Matrix.rotateM(
+                modelMatrix,
+                0,
+                rotationX,
+                1.0f,
+                0.0f,
+                0.0f
+        );
 
-        // Cálculo do fator de escala
+        // Correção da orientação original do modelo.
+        Matrix.rotateM(
+                modelMatrix,
+                0,
+                -90.0f,
+                1.0f,
+                0.0f,
+                0.0f
+        );
+
+        // Calcula a escala para enquadrar o objeto.
         float boundingRadius = mesh.getBoundingRadius();
-        float targetSize = 1.5f; // Tamanho para caber na visão da câmera
-        float scale = (boundingRadius > 0) ? (targetSize / boundingRadius) : 1.0f;
 
-        // Aplica a escala proporcional no modelo
-        Matrix.scaleM(modelMatrix, 0, scale, scale, scale);
+        float targetSize = 1.5f;
 
-        // Centralização do modelo na origem (0,0,0)
+        float baseScale = boundingRadius > 0.0f
+                ? targetSize / boundingRadius
+                : 1.0f;
+
+        // Aplica o zoom do usuário à escala inicial.
+        float finalScale = baseScale * zoomFactor;
+
+        Matrix.scaleM(
+                modelMatrix,
+                0,
+                finalScale,
+                finalScale,
+                finalScale
+        );
+
+        // Centraliza o objeto na origem.
         float[] center = mesh.getCenter();
-        Matrix.translateM(modelMatrix, 0, -center[0], -center[1], -center[2]);
+
+        Matrix.translateM(
+                modelMatrix,
+                0,
+                -center[0],
+                -center[1],
+                -center[2]
+        );
 
         /*
          * =========================================================
@@ -310,9 +450,7 @@ public class GraphRenderer implements GLSurfaceView.Renderer {
                         )
                         .asFloatBuffer();
 
-        vertexBuffer.put(
-                positions
-        );
+        vertexBuffer.put(positions);
 
         vertexBuffer.position(0);
 
@@ -336,14 +474,13 @@ public class GraphRenderer implements GLSurfaceView.Renderer {
 
         /*
          * =========================================================
-         * CALCULA MATRIZ MVP
+         * CALCULA A MATRIZ MVP
          * =========================================================
          */
 
-        float[] tempMatrix =
-                new float[16];
+        float[] tempMatrix = new float[16];
 
-        // View × Model
+        // View × Model.
         Matrix.multiplyMM(
                 tempMatrix,
                 0,
@@ -353,7 +490,7 @@ public class GraphRenderer implements GLSurfaceView.Renderer {
                 0
         );
 
-        // Projection × View × Model
+        // Projection × View × Model.
         Matrix.multiplyMM(
                 mvpMatrix,
                 0,
@@ -365,17 +502,15 @@ public class GraphRenderer implements GLSurfaceView.Renderer {
 
         /*
          * =========================================================
-         * ATIVA SHADER
+         * ATIVA O SHADER
          * =========================================================
          */
 
-        GLES30.glUseProgram(
-                shaderProgram
-        );
+        GLES30.glUseProgram(shaderProgram);
 
         /*
          * =========================================================
-         * ENVIA MATRIZ PARA O SHADER
+         * ENVIA A MATRIZ PARA O SHADER
          * =========================================================
          */
 
@@ -395,13 +530,11 @@ public class GraphRenderer implements GLSurfaceView.Renderer {
 
         /*
          * =========================================================
-         * CONFIGURA POSIÇÃO DOS VÉRTICES
+         * CONFIGURA A POSIÇÃO DOS VÉRTICES
          * =========================================================
          */
 
-        GLES30.glEnableVertexAttribArray(
-                0
-        );
+        GLES30.glEnableVertexAttribArray(0);
 
         GLES30.glVertexAttribPointer(
                 0,
@@ -430,15 +563,13 @@ public class GraphRenderer implements GLSurfaceView.Renderer {
          * =========================================================
          */
 
-        int error =
-                GLES30.glGetError();
+        int error = GLES30.glGetError();
 
         if (error != GLES30.GL_NO_ERROR) {
 
             Log.e(
                     TAG,
-                    "Erro OpenGL ao desenhar: " +
-                            error
+                    "Erro OpenGL ao desenhar: " + error
             );
         }
 
@@ -448,9 +579,7 @@ public class GraphRenderer implements GLSurfaceView.Renderer {
          * =========================================================
          */
 
-        GLES30.glDisableVertexAttribArray(
-                0
-        );
+        GLES30.glDisableVertexAttribArray(0);
 
         GLES30.glBindBuffer(
                 GLES30.GL_ARRAY_BUFFER,
@@ -458,27 +587,27 @@ public class GraphRenderer implements GLSurfaceView.Renderer {
         );
     }
 
+    /*
+     * =========================================================
+     * COMPILAÇÃO DOS SHADERS
+     * =========================================================
+     */
+
     private int compileShader(
             int type,
             String shaderCode
     ) {
 
-        int shader =
-                GLES30.glCreateShader(
-                        type
-                );
+        int shader = GLES30.glCreateShader(type);
 
         GLES30.glShaderSource(
                 shader,
                 shaderCode
         );
 
-        GLES30.glCompileShader(
-                shader
-        );
+        GLES30.glCompileShader(shader);
 
-        int[] compileStatus =
-                new int[1];
+        int[] compileStatus = new int[1];
 
         GLES30.glGetShaderiv(
                 shader,
@@ -492,14 +621,10 @@ public class GraphRenderer implements GLSurfaceView.Renderer {
             Log.e(
                     TAG,
                     "Erro ao compilar shader: " +
-                            GLES30.glGetShaderInfoLog(
-                                    shader
-                            )
+                            GLES30.glGetShaderInfoLog(shader)
             );
 
-            GLES30.glDeleteShader(
-                    shader
-            );
+            GLES30.glDeleteShader(shader);
 
             return 0;
         }
