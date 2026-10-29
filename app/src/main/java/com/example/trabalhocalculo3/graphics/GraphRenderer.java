@@ -19,7 +19,10 @@ public class GraphRenderer implements GLSurfaceView.Renderer {
     private static final String TAG = "GraphRenderer";
 
     private int shaderProgram;
+
+    // Buffer de posições e buffer de normais.
     private int vertexBufferObject;
+    private int normalBufferObject;
 
     private int vertexCount;
 
@@ -30,7 +33,6 @@ public class GraphRenderer implements GLSurfaceView.Renderer {
     // Zoom controlado pelo usuário.
     private volatile float zoomFactor = 1.0f;
 
-    // Limites do zoom.
     private static final float MIN_ZOOM = 0.3f;
     private static final float MAX_ZOOM = 4.0f;
 
@@ -38,36 +40,82 @@ public class GraphRenderer implements GLSurfaceView.Renderer {
 
     private boolean drawLog = false;
 
-    // Matriz final enviada para o shader.
     private final float[] mvpMatrix = new float[16];
-
-    // Matriz de projeção.
     private final float[] projectionMatrix = new float[16];
-
-    // Matriz da câmera.
     private final float[] viewMatrix = new float[16];
-
-    // Matriz do objeto.
     private final float[] modelMatrix = new float[16];
+    private final float[] modelViewMatrix = new float[16];
+
+    /*
+     * =========================================================
+     * VERTEX SHADER
+     * Calcula a posição dos vértices e transforma as normais.
+     * =========================================================
+     */
 
     private final String vertexShaderCode =
             "#version 300 es\n" +
             "layout(location = 0) in vec3 aPosition;\n" +
-            "\n" +
+            "layout(location = 1) in vec3 aNormal;\n" +
+
             "uniform mat4 uMVPMatrix;\n" +
-            "\n" +
+            "uniform mat4 uMVMatrix;\n" +
+
+            "out vec3 vNormal;\n" +
+            "out vec3 vPosition;\n" +
+
             "void main() {\n" +
+            "    vec4 positionView = uMVMatrix * vec4(aPosition, 1.0);\n" +
+            "    vPosition = positionView.xyz;\n" +
+            "    vNormal = normalize(mat3(uMVMatrix) * aNormal);\n" +
             "    gl_Position = uMVPMatrix * vec4(aPosition, 1.0);\n" +
             "}";
 
+    /*
+     * =========================================================
+     * FRAGMENT SHADER
+     * Calcula iluminação ambiente, difusa e especular.
+     * =========================================================
+     */
+
     private final String fragmentShaderCode =
             "#version 300 es\n" +
-            "precision mediump float;\n" +
-            "\n" +
+            "precision highp float;\n" +
+
+            "in vec3 vNormal;\n" +
+            "in vec3 vPosition;\n" +
+
             "out vec4 fragColor;\n" +
-            "\n" +
+
             "void main() {\n" +
-            "    fragColor = vec4(0.2, 0.7, 1.0, 1.0);\n" +
+
+            "    vec3 normal = normalize(vNormal);\n" +
+
+            // Direção da luz no espaço da câmera.
+            "    vec3 lightDirection = normalize(vec3(-0.5, 0.8, 1.0));\n" +
+
+            // Iluminação difusa: evidencia as diferenças entre as faces.
+            "    float diffuse = max(dot(normal, lightDirection), 0.0);\n" +
+
+            // Iluminação ambiente: evita que as áreas sem luz desapareçam.
+            "    float ambient = 0.28;\n" +
+
+            // Direção entre a superfície e a câmera.
+            "    vec3 viewDirection = normalize(-vPosition);\n" +
+
+            // Reflexo da luz para calcular o brilho.
+            "    vec3 reflectedLight = reflect(-lightDirection, normal);\n" +
+
+            "    float specular = pow(max(dot(viewDirection, reflectedLight), 0.0), 32.0);\n" +
+
+            // Cor-base azul.
+            "    vec3 baseColor = vec3(0.20, 0.62, 0.95);\n" +
+
+            // Combinação das três componentes de iluminação.
+            "    vec3 color = baseColor * (ambient + 0.85 * diffuse);\n" +
+            "    color += vec3(1.0) * 0.25 * specular;\n" +
+
+            "    fragColor = vec4(color, 1.0);\n" +
             "}";
 
     /*
@@ -80,8 +128,9 @@ public class GraphRenderer implements GLSurfaceView.Renderer {
 
         this.mesh = mesh;
 
-        // Restaura os controles ao carregar outro objeto.
         resetCamera();
+
+        drawLog = false;
 
         if (mesh == null) {
             vertexCount = 0;
@@ -92,9 +141,11 @@ public class GraphRenderer implements GLSurfaceView.Renderer {
 
         Log.d(
                 TAG,
-                "Mesh recebido: " +
+                "Malha recebida: " +
                         vertexCount +
-                        " vertices"
+                        " vertices, " +
+                        mesh.getTriangleCount() +
+                        " triangulos"
         );
     }
 
@@ -104,24 +155,12 @@ public class GraphRenderer implements GLSurfaceView.Renderer {
      * =========================================================
      */
 
-    /**
-     * Controla a rotação manual do objeto.
-     *
-     * deltaX: movimento horizontal do dedo.
-     * deltaY: movimento vertical do dedo.
-     */
     public void rotateBy(float deltaX, float deltaY) {
 
         rotationY += deltaX;
         rotationX += deltaY;
     }
 
-    /**
-     * Aplica o zoom recebido do gesto de pinça.
-     *
-     * scaleFactor maior que 1: aproxima.
-     * scaleFactor menor que 1: afasta.
-     */
     public void zoomBy(float scaleFactor) {
 
         if (scaleFactor <= 0.0f) {
@@ -136,9 +175,6 @@ public class GraphRenderer implements GLSurfaceView.Renderer {
         );
     }
 
-    /**
-     * Restaura a rotação e o zoom iniciais.
-     */
     public void resetCamera() {
 
         rotationX = 0.0f;
@@ -166,9 +202,9 @@ public class GraphRenderer implements GLSurfaceView.Renderer {
         );
 
         // Ativa o teste de profundidade.
-        GLES30.glEnable(
-                GLES30.GL_DEPTH_TEST
-        );
+        GLES30.glEnable(GLES30.GL_DEPTH_TEST);
+
+        GLES30.glDepthFunc(GLES30.GL_LESS);
 
         int vertexShader = compileShader(
                 GLES30.GL_VERTEX_SHADER,
@@ -180,7 +216,6 @@ public class GraphRenderer implements GLSurfaceView.Renderer {
                 fragmentShaderCode
         );
 
-        // Interrompe a inicialização se algum shader falhar.
         if (vertexShader == 0 || fragmentShader == 0) {
 
             if (vertexShader != 0) {
@@ -191,7 +226,7 @@ public class GraphRenderer implements GLSurfaceView.Renderer {
                 GLES30.glDeleteShader(fragmentShader);
             }
 
-            Log.e(TAG, "Não foi possível compilar os shaders.");
+            Log.e(TAG, "Falha ao compilar os shaders.");
 
             shaderProgram = 0;
 
@@ -212,7 +247,6 @@ public class GraphRenderer implements GLSurfaceView.Renderer {
 
         GLES30.glLinkProgram(shaderProgram);
 
-        // Os shaders já foram anexados ao programa.
         GLES30.glDeleteShader(vertexShader);
         GLES30.glDeleteShader(fragmentShader);
 
@@ -229,10 +263,8 @@ public class GraphRenderer implements GLSurfaceView.Renderer {
 
             Log.e(
                     TAG,
-                    "Erro ao linkar programa: " +
-                            GLES30.glGetProgramInfoLog(
-                                    shaderProgram
-                            )
+                    "Erro ao linkar o programa: " +
+                            GLES30.glGetProgramInfoLog(shaderProgram)
             );
 
             GLES30.glDeleteProgram(shaderProgram);
@@ -242,22 +274,17 @@ public class GraphRenderer implements GLSurfaceView.Renderer {
             return;
         }
 
-        // Cria o VBO.
-        int[] buffers = new int[1];
+        // Cria os dois buffers da GPU.
+        int[] buffers = new int[2];
 
-        GLES30.glGenBuffers(
-                1,
-                buffers,
-                0
-        );
+        GLES30.glGenBuffers(2, buffers, 0);
 
         vertexBufferObject = buffers[0];
+        normalBufferObject = buffers[1];
 
-        // Inicializa a matriz do objeto.
-        Matrix.setIdentityM(
-                modelMatrix,
-                0
-        );
+        Matrix.setIdentityM(modelMatrix, 0);
+
+        Log.d(TAG, "OpenGL inicializado com iluminacao 3D.");
     }
 
     /*
@@ -273,21 +300,14 @@ public class GraphRenderer implements GLSurfaceView.Renderer {
             int height
     ) {
 
-        GLES30.glViewport(
-                0,
-                0,
-                width,
-                height
-        );
+        GLES30.glViewport(0, 0, width, height);
 
         if (width <= 0 || height <= 0) {
             return;
         }
 
-        float aspectRatio =
-                (float) width / (float) height;
+        float aspectRatio = (float) width / (float) height;
 
-        // Configuração da perspectiva.
         Matrix.perspectiveM(
                 projectionMatrix,
                 0,
@@ -297,25 +317,12 @@ public class GraphRenderer implements GLSurfaceView.Renderer {
                 100.0f
         );
 
-        // Configuração da câmera.
         Matrix.setLookAtM(
                 viewMatrix,
                 0,
-
-                // Posição da câmera.
-                0.0f,
-                0.0f,
-                3.0f,
-
-                // Ponto para onde olha.
-                0.0f,
-                0.0f,
-                0.0f,
-
-                // Direção para cima.
-                0.0f,
-                1.0f,
-                0.0f
+                0.0f, 0.0f, 3.0f,
+                0.0f, 0.0f, 0.0f,
+                0.0f, 1.0f, 0.0f
         );
     }
 
@@ -328,17 +335,30 @@ public class GraphRenderer implements GLSurfaceView.Renderer {
     @Override
     public void onDrawFrame(GL10 gl) {
 
-        // Limpa a tela e o buffer de profundidade.
         GLES30.glClear(
                 GLES30.GL_COLOR_BUFFER_BIT |
                         GLES30.GL_DEPTH_BUFFER_BIT
         );
 
-        if (shaderProgram == 0) {
+        if (shaderProgram == 0 || mesh == null) {
             return;
         }
 
-        if (mesh == null) {
+        float[] positions = mesh.getPositions();
+        float[] normals = mesh.getNormals();
+
+        if (positions == null || positions.length == 0) {
+            return;
+        }
+
+        if (normals == null || normals.length != positions.length) {
+
+            Log.e(
+                    TAG,
+                    "A malha nao possui uma normal para cada vertice. " +
+                            "Verifique o MeshImporter."
+            );
+
             return;
         }
 
@@ -346,32 +366,19 @@ public class GraphRenderer implements GLSurfaceView.Renderer {
 
             Log.d(
                     TAG,
-                    "Iniciando desenho. VertexCount = " +
-                            vertexCount
+                    "Desenhando malha: " +
+                            vertexCount +
+                            " vertices."
             );
 
             drawLog = true;
         }
 
-        float[] positions = mesh.getPositions();
-
-        if (positions == null || positions.length == 0) {
-            return;
-        }
-
         /*
-         * =========================================================
          * TRANSFORMAÇÕES DO OBJETO
-         * =========================================================
-         *
-         * A rotação não é mais automática.
-         * Os ângulos são definidos pelos gestos do usuário.
          */
 
-        Matrix.setIdentityM(
-                modelMatrix,
-                0
-        );
+        Matrix.setIdentityM(modelMatrix, 0);
 
         // Rotação horizontal.
         Matrix.rotateM(
@@ -393,7 +400,7 @@ public class GraphRenderer implements GLSurfaceView.Renderer {
                 0.0f
         );
 
-        // Correção da orientação original do modelo.
+        // Mantém a correção de orientação do modelo original.
         Matrix.rotateM(
                 modelMatrix,
                 0,
@@ -403,7 +410,7 @@ public class GraphRenderer implements GLSurfaceView.Renderer {
                 0.0f
         );
 
-        // Calcula a escala para enquadrar o objeto.
+        // Ajusta o tamanho inicial.
         float boundingRadius = mesh.getBoundingRadius();
 
         float targetSize = 1.5f;
@@ -412,7 +419,6 @@ public class GraphRenderer implements GLSurfaceView.Renderer {
                 ? targetSize / boundingRadius
                 : 1.0f;
 
-        // Aplica o zoom do usuário à escala inicial.
         float finalScale = baseScale * zoomFactor;
 
         Matrix.scaleM(
@@ -423,7 +429,7 @@ public class GraphRenderer implements GLSurfaceView.Renderer {
                 finalScale
         );
 
-        // Centraliza o objeto na origem.
+        // Centraliza a malha.
         float[] center = mesh.getCenter();
 
         Matrix.translateM(
@@ -435,29 +441,27 @@ public class GraphRenderer implements GLSurfaceView.Renderer {
         );
 
         /*
-         * =========================================================
-         * CRIA BUFFER DOS VÉRTICES
-         * =========================================================
+         * PREPARA OS BUFFERS DE POSIÇÕES E NORMAIS
          */
 
         FloatBuffer vertexBuffer =
-                ByteBuffer
-                        .allocateDirect(
-                                positions.length * 4
-                        )
-                        .order(
-                                ByteOrder.nativeOrder()
-                        )
+                ByteBuffer.allocateDirect(positions.length * 4)
+                        .order(ByteOrder.nativeOrder())
                         .asFloatBuffer();
 
         vertexBuffer.put(positions);
-
         vertexBuffer.position(0);
 
+        FloatBuffer normalBuffer =
+                ByteBuffer.allocateDirect(normals.length * 4)
+                        .order(ByteOrder.nativeOrder())
+                        .asFloatBuffer();
+
+        normalBuffer.put(normals);
+        normalBuffer.position(0);
+
         /*
-         * =========================================================
-         * ENVIA VÉRTICES PARA A GPU
-         * =========================================================
+         * ENVIA AS POSIÇÕES PARA A GPU
          */
 
         GLES30.glBindBuffer(
@@ -473,16 +477,28 @@ public class GraphRenderer implements GLSurfaceView.Renderer {
         );
 
         /*
-         * =========================================================
-         * CALCULA A MATRIZ MVP
-         * =========================================================
+         * ENVIA AS NORMAIS PARA A GPU
          */
 
-        float[] tempMatrix = new float[16];
+        GLES30.glBindBuffer(
+                GLES30.GL_ARRAY_BUFFER,
+                normalBufferObject
+        );
 
-        // View × Model.
+        GLES30.glBufferData(
+                GLES30.GL_ARRAY_BUFFER,
+                normals.length * 4,
+                normalBuffer,
+                GLES30.GL_DYNAMIC_DRAW
+        );
+
+        /*
+         * CALCULA AS MATRIZES
+         */
+
+        // ModelView = View × Model.
         Matrix.multiplyMM(
-                tempMatrix,
+                modelViewMatrix,
                 0,
                 viewMatrix,
                 0,
@@ -490,38 +506,33 @@ public class GraphRenderer implements GLSurfaceView.Renderer {
                 0
         );
 
-        // Projection × View × Model.
+        // MVP = Projection × ModelView.
         Matrix.multiplyMM(
                 mvpMatrix,
                 0,
                 projectionMatrix,
                 0,
-                tempMatrix,
+                modelViewMatrix,
                 0
         );
 
         /*
-         * =========================================================
          * ATIVA O SHADER
-         * =========================================================
          */
 
         GLES30.glUseProgram(shaderProgram);
 
         /*
-         * =========================================================
-         * ENVIA A MATRIZ PARA O SHADER
-         * =========================================================
+         * ENVIA A MATRIZ MVP
          */
 
-        int matrixHandle =
-                GLES30.glGetUniformLocation(
-                        shaderProgram,
-                        "uMVPMatrix"
-                );
+        int mvpHandle = GLES30.glGetUniformLocation(
+                shaderProgram,
+                "uMVPMatrix"
+        );
 
         GLES30.glUniformMatrix4fv(
-                matrixHandle,
+                mvpHandle,
                 1,
                 false,
                 mvpMatrix,
@@ -529,10 +540,31 @@ public class GraphRenderer implements GLSurfaceView.Renderer {
         );
 
         /*
-         * =========================================================
-         * CONFIGURA A POSIÇÃO DOS VÉRTICES
-         * =========================================================
+         * ENVIA A MATRIZ MODELVIEW
+         * Necessária para transformar as normais e as posições.
          */
+
+        int mvHandle = GLES30.glGetUniformLocation(
+                shaderProgram,
+                "uMVMatrix"
+        );
+
+        GLES30.glUniformMatrix4fv(
+                mvHandle,
+                1,
+                false,
+                modelViewMatrix,
+                0
+        );
+
+        /*
+         * CONFIGURA OS VÉRTICES
+         */
+
+        GLES30.glBindBuffer(
+                GLES30.GL_ARRAY_BUFFER,
+                vertexBufferObject
+        );
 
         GLES30.glEnableVertexAttribArray(0);
 
@@ -546,21 +578,37 @@ public class GraphRenderer implements GLSurfaceView.Renderer {
         );
 
         /*
-         * =========================================================
-         * DESENHA O OBJETO
-         * =========================================================
+         * CONFIGURA AS NORMAIS
+         */
+
+        GLES30.glBindBuffer(
+                GLES30.GL_ARRAY_BUFFER,
+                normalBufferObject
+        );
+
+        GLES30.glEnableVertexAttribArray(1);
+
+        GLES30.glVertexAttribPointer(
+                1,
+                3,
+                GLES30.GL_FLOAT,
+                false,
+                3 * 4,
+                0
+        );
+
+        /*
+         * DESENHA A MALHA
          */
 
         GLES30.glDrawArrays(
                 GLES30.GL_TRIANGLES,
                 0,
-                vertexCount
+                Math.min(vertexCount, positions.length / 3)
         );
 
         /*
-         * =========================================================
          * VERIFICA ERROS OPENGL
-         * =========================================================
          */
 
         int error = GLES30.glGetError();
@@ -574,12 +622,11 @@ public class GraphRenderer implements GLSurfaceView.Renderer {
         }
 
         /*
-         * =========================================================
          * LIMPEZA
-         * =========================================================
          */
 
         GLES30.glDisableVertexAttribArray(0);
+        GLES30.glDisableVertexAttribArray(1);
 
         GLES30.glBindBuffer(
                 GLES30.GL_ARRAY_BUFFER,
@@ -600,10 +647,7 @@ public class GraphRenderer implements GLSurfaceView.Renderer {
 
         int shader = GLES30.glCreateShader(type);
 
-        GLES30.glShaderSource(
-                shader,
-                shaderCode
-        );
+        GLES30.glShaderSource(shader, shaderCode);
 
         GLES30.glCompileShader(shader);
 
