@@ -83,6 +83,10 @@ public class GraphSurfaceView extends GLSurfaceView {
     @Override
     public boolean onTouchEvent(MotionEvent event) {
 
+        if (event.getActionMasked() == MotionEvent.ACTION_DOWN) {
+            getParent().requestDisallowInterceptTouchEvent(true);
+        }
+
         // Encaminha os eventos para os detectores de gestos.
         gestureDetector.onTouchEvent(event);
         scaleDetector.onTouchEvent(event);
@@ -145,6 +149,8 @@ public class GraphSurfaceView extends GLSurfaceView {
 
             case MotionEvent.ACTION_UP:
             case MotionEvent.ACTION_CANCEL:
+
+                getParent().requestDisallowInterceptTouchEvent(false);
 
                 return true;
 
