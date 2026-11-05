@@ -62,10 +62,18 @@
                 android:layout_height="250dp"
                 android:layout_marginTop="4dp" />
 
+            <CheckBox
+                android:id="@+id/checkBoxCenterOfMass"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Exibir centro de massa"
+                android:textSize="12sp"
+                android:visibility="gone" />
+
             <TextView
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="20dp"
+                android:layout_marginTop="8dp"
                 android:text="Unidade de medida"
                 android:textColor="#212121"
                 android:textSize="16sp"

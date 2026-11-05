@@ -80,43 +80,50 @@ public class GraphRenderer implements GLSurfaceView.Renderer {
 
     private final String fragmentShaderCode =
             "#version 300 es\n" +
-            "precision highp float;\n" +
+                    "precision highp float;\n" +
+                    "uniform vec3 uColor;\n" +
+                    "uniform float uAlpha;\n" +
+                    "in vec3 vNormal;\n" +
+                    "in vec3 vPosition;\n" +
 
-            "in vec3 vNormal;\n" +
-            "in vec3 vPosition;\n" +
+                    "out vec4 fragColor;\n" +
 
-            "out vec4 fragColor;\n" +
+                    "void main() {\n" +
 
-            "void main() {\n" +
+                    "    vec3 normal = normalize(vNormal);\n" +
 
-            "    vec3 normal = normalize(vNormal);\n" +
+                    // Direção da luz no espaço da câmera.
+                    "    vec3 lightDirection = normalize(vec3(-0.5, 0.8, 1.0));\n" +
 
-            // Direção da luz no espaço da câmera.
-            "    vec3 lightDirection = normalize(vec3(-0.5, 0.8, 1.0));\n" +
+                    // Iluminação difusa: evidencia as diferenças entre as faces.
+                    "    float diffuse = max(dot(normal, lightDirection), 0.0);\n" +
+                    // Iluminação ambiente: evita que as áreas sem luz desapareçam.
+                    "    float ambient = 0.28;\n" +
+                    // Direção entre a superfície e a câmera.
+                    "    vec3 viewDirection = normalize(-vPosition);\n" +
+                    // Reflexo da luz para calcular o brilho.
+                    "    vec3 reflectedLight = reflect(-lightDirection, normal);\n" +
+                    "    float specular = pow(max(dot(viewDirection, reflectedLight), 0.0), 32.0);\n" +
+                    // Combinação das três componentes de iluminação.
+                    "    vec3 color = uColor * (ambient + 0.85 * diffuse);\n" +
+                    "    color += vec3(1.0) * 0.25 * specular;\n" +
+                    "    fragColor = vec4(color, uAlpha);\n" +
+                    "}";
+    // CENTRO DE MASSA
+    private double[] centerOfMass = null;
+    private boolean showCenterOfMass = false;
+    private Sphere centerOfMassSphere;
+    private float sphereRadiusUsed = -1f;
+    private int sphereVbo;
+    private int sphereNormalVbo;
 
-            // Iluminação difusa: evidencia as diferenças entre as faces.
-            "    float diffuse = max(dot(normal, lightDirection), 0.0);\n" +
+    public void setCenterOfMass(double[] centerOfMass) {
+        this.centerOfMass = centerOfMass;
+    }
 
-            // Iluminação ambiente: evita que as áreas sem luz desapareçam.
-            "    float ambient = 0.28;\n" +
-
-            // Direção entre a superfície e a câmera.
-            "    vec3 viewDirection = normalize(-vPosition);\n" +
-
-            // Reflexo da luz para calcular o brilho.
-            "    vec3 reflectedLight = reflect(-lightDirection, normal);\n" +
-
-            "    float specular = pow(max(dot(viewDirection, reflectedLight), 0.0), 32.0);\n" +
-
-            // Cor-base azul.
-            "    vec3 baseColor = vec3(0.20, 0.62, 0.95);\n" +
-
-            // Combinação das três componentes de iluminação.
-            "    vec3 color = baseColor * (ambient + 0.85 * diffuse);\n" +
-            "    color += vec3(1.0) * 0.25 * specular;\n" +
-
-            "    fragColor = vec4(color, 1.0);\n" +
-            "}";
+    public void setShowCenterOfMass(boolean show) {
+        this.showCenterOfMass = show;
+    }
 
     /*
      * =========================================================
@@ -275,12 +282,14 @@ public class GraphRenderer implements GLSurfaceView.Renderer {
         }
 
         // Cria os dois buffers da GPU.
-        int[] buffers = new int[2];
+        int[] buffers = new int[4];
 
-        GLES30.glGenBuffers(2, buffers, 0);
+        GLES30.glGenBuffers(4, buffers, 0);
 
         vertexBufferObject = buffers[0];
         normalBufferObject = buffers[1];
+        sphereVbo = buffers[2];
+        sphereNormalVbo = buffers[3];
 
         Matrix.setIdentityM(modelMatrix, 0);
 
@@ -558,80 +567,88 @@ public class GraphRenderer implements GLSurfaceView.Renderer {
         );
 
         /*
-         * CONFIGURA OS VÉRTICES
+         * DESENHO DO MARCADOR DO CENTRO DE MASSA, SE ATIVADO
          */
+        float markerRadius = mesh.getBoundingRadius() * 0.05f; // 5% do tamanho total do objeto
+        if (centerOfMassSphere == null || sphereRadiusUsed != markerRadius) {
+            createMarker(markerRadius);
+        }
+        int colorHandle = GLES30.glGetUniformLocation(shaderProgram, "uColor");
+        int alphaHandle = GLES30.glGetUniformLocation(shaderProgram, "uAlpha");
 
-        GLES30.glBindBuffer(
-                GLES30.GL_ARRAY_BUFFER,
-                vertexBufferObject
-        );
+        // Esfera vermelha opaca primeiro, para entrar no depth buffer
+        if (showCenterOfMass && centerOfMass != null && centerOfMassSphere != null) {
+            float[] mm = new float[16];
+            System.arraycopy(modelMatrix, 0, mm, 0, 16);
+            Matrix.translateM(mm, 0,
+                    (float) centerOfMass[0],
+                    (float) centerOfMass[1],
+                    (float) centerOfMass[2]);
 
-        GLES30.glEnableVertexAttribArray(0);
+            float[] mmv = new float[16];
+            float[] mmvp = new float[16];
+            Matrix.multiplyMM(mmv, 0, viewMatrix, 0, mm, 0);
+            Matrix.multiplyMM(mmvp, 0, projectionMatrix, 0, mmv, 0);
 
-        GLES30.glVertexAttribPointer(
-                0,
-                3,
-                GLES30.GL_FLOAT,
-                false,
-                3 * 4,
-                0
-        );
+            GLES30.glUniformMatrix4fv(mvpHandle, 1, false, mmvp, 0);
+            GLES30.glUniformMatrix4fv(mvHandle, 1, false, mmv, 0);
+            GLES30.glUniform3f(colorHandle, 1.0f, 0.1f, 0.1f);
+            GLES30.glUniform1f(alphaHandle, 1.0f);
 
-        /*
-         * CONFIGURA AS NORMAIS
-         */
+            GLES30.glBindBuffer(GLES30.GL_ARRAY_BUFFER, sphereVbo);
+            GLES30.glEnableVertexAttribArray(0);
+            GLES30.glVertexAttribPointer(0, 3, GLES30.GL_FLOAT, false, 12, 0);
 
-        GLES30.glBindBuffer(
-                GLES30.GL_ARRAY_BUFFER,
-                normalBufferObject
-        );
+            GLES30.glBindBuffer(GLES30.GL_ARRAY_BUFFER, sphereNormalVbo);
+            GLES30.glEnableVertexAttribArray(1);
+            GLES30.glVertexAttribPointer(1, 3, GLES30.GL_FLOAT, false, 12, 0);
 
-        GLES30.glEnableVertexAttribArray(1);
+            GLES30.glDrawArrays(GLES30.GL_TRIANGLES, 0, centerOfMassSphere.getVertexCount());
 
-        GLES30.glVertexAttribPointer(
-                1,
-                3,
-                GLES30.GL_FLOAT,
-                false,
-                3 * 4,
-                0
-        );
-
-        /*
-         * DESENHA A MALHA
-         */
-
-        GLES30.glDrawArrays(
-                GLES30.GL_TRIANGLES,
-                0,
-                Math.min(vertexCount, positions.length / 3)
-        );
-
-        /*
-         * VERIFICA ERROS OPENGL
-         */
-
-        int error = GLES30.glGetError();
-
-        if (error != GLES30.GL_NO_ERROR) {
-
-            Log.e(
-                    TAG,
-                    "Erro OpenGL ao desenhar: " + error
-            );
+            // Restaura as matrizes da malha
+            GLES30.glUniformMatrix4fv(mvpHandle, 1, false, mvpMatrix, 0);
+            GLES30.glUniformMatrix4fv(mvHandle, 1, false, modelViewMatrix, 0);
         }
 
-        /*
-         * LIMPEZA
-         */
+        // Malha translúcida se o centro de massa está visível
+        GLES30.glUniform3f(colorHandle, 0.20f, 0.62f, 0.95f);
 
+        if (showCenterOfMass) {
+            GLES30.glUniform1f(alphaHandle, 0.5f); // Controla a translucidez
+            GLES30.glEnable(GLES30.GL_BLEND);
+            GLES30.glBlendFunc(GLES30.GL_SRC_ALPHA, GLES30.GL_ONE_MINUS_SRC_ALPHA);
+            GLES30.glDepthMask(false);
+        } else {
+            GLES30.glUniform1f(alphaHandle, 1.0f);
+        }
+
+        // Configurar vértices e normais
+        GLES30.glBindBuffer(GLES30.GL_ARRAY_BUFFER, vertexBufferObject);
+        GLES30.glEnableVertexAttribArray(0);
+        GLES30.glVertexAttribPointer(0, 3, GLES30.GL_FLOAT, false, 12, 0);
+
+        GLES30.glBindBuffer(GLES30.GL_ARRAY_BUFFER, normalBufferObject);
+        GLES30.glEnableVertexAttribArray(1);
+        GLES30.glVertexAttribPointer(1, 3, GLES30.GL_FLOAT, false, 12, 0);
+
+        // Desenhar a malha
+        GLES30.glDrawArrays(GLES30.GL_TRIANGLES, 0,
+                Math.min(vertexCount, positions.length / 3));
+
+        // Restaura o estado
+        GLES30.glDepthMask(true);
+        GLES30.glDisable(GLES30.GL_BLEND);
+
+        // Verificação de erro OpenGL
+        int error = GLES30.glGetError();
+        if (error != GLES30.GL_NO_ERROR) {
+            Log.e(TAG, "Erro OpenGL ao desenhar: " + error);
+        }
+
+        // Limpeza
         GLES30.glDisableVertexAttribArray(0);
         GLES30.glDisableVertexAttribArray(1);
-
-        GLES30.glBindBuffer(
-                GLES30.GL_ARRAY_BUFFER,
-                0
-        );
+        GLES30.glBindBuffer(GLES30.GL_ARRAY_BUFFER, 0);
     }
 
     /*
@@ -674,5 +691,36 @@ public class GraphRenderer implements GLSurfaceView.Renderer {
         }
 
         return shader;
+    }
+
+    // Cria a esfera e envia posições e normais
+    private void createMarker(float radius) {
+        centerOfMassSphere = new Sphere(radius, 16, 16);
+        sphereRadiusUsed = radius;
+
+        FloatBuffer vb = centerOfMassSphere.getVertexBuffer();
+        int n = centerOfMassSphere.getVertexCount();
+        float[] sp = new float[n * 3];
+        vb.position(0);
+        vb.get(sp);
+        vb.position(0);
+
+        float[] sn = new float[n * 3];
+        for (int i = 0; i < n; i++) {
+            float x = sp[i * 3], y = sp[i * 3 + 1], z = sp[i * 3 + 2];
+            float len = (float) Math.sqrt(x * x + y * y + z * z);
+            if (len == 0) len = 1;
+            sn[i * 3] = x / len;
+            sn[i * 3 + 1] = y / len;
+            sn[i * 3 + 2] = z / len;
+        }
+        FloatBuffer nb = ByteBuffer.allocateDirect(sn.length * 4)
+                .order(ByteOrder.nativeOrder()).asFloatBuffer();
+        nb.put(sn).position(0);
+
+        GLES30.glBindBuffer(GLES30.GL_ARRAY_BUFFER, sphereVbo);
+        GLES30.glBufferData(GLES30.GL_ARRAY_BUFFER, n * 12, vb, GLES30.GL_STATIC_DRAW);
+        GLES30.glBindBuffer(GLES30.GL_ARRAY_BUFFER, sphereNormalVbo);
+        GLES30.glBufferData(GLES30.GL_ARRAY_BUFFER, sn.length * 4, nb, GLES30.GL_STATIC_DRAW);
     }
 }

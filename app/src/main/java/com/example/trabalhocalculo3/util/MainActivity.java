@@ -8,6 +8,7 @@ import android.os.Bundle;
 import android.view.View;
 import android.widget.AdapterView;
 import android.widget.Button;
+import android.widget.CheckBox;
 import android.widget.SeekBar;
 import android.widget.Spinner;
 import android.widget.TextView;
@@ -45,23 +46,27 @@ public class MainActivity extends AppCompatActivity {
     private Unit modelUnit = Unit.MILLIMETER; // unidade utilizada pelo modelo; informado pelo usuário
     private Unit displayUnit = Unit.MILLIMETER; // unidade mostrada; pode ser alterada pelo usuário
     private GraphSurfaceView graphView;
+    private CheckBox chkShowCenterOfMass;
     private double[] rawCenterOfMass = new double[]{0, 0, 0};
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
-    super.onCreate(savedInstanceState);
-    setContentView(R.layout.activity_main);
+        super.onCreate(savedInstanceState);
+        setContentView(R.layout.activity_main);
 
-    graphView = findViewById(R.id.graphView);
+        graphView = findViewById(R.id.graphView);
 
-    btnImportStl = findViewById(R.id.btnImport);
-    txtImportStatus = findViewById(R.id.textImportStatus);
-    SeekBar seekDensity = findViewById(R.id.seekDensity);
-    txtDensityLabel = findViewById(R.id.txtDensityLabel);
-    txtResults = findViewById(R.id.txtResults);
-    spinner = findViewById(R.id.spinner);
+        btnImportStl = findViewById(R.id.btnImport);
+        txtImportStatus = findViewById(R.id.textImportStatus);
+        SeekBar seekDensity = findViewById(R.id.seekDensity);
+        txtDensityLabel = findViewById(R.id.txtDensityLabel);
+        txtResults = findViewById(R.id.txtResults);
+        spinner = findViewById(R.id.spinner);
+        chkShowCenterOfMass = findViewById(R.id.checkBoxCenterOfMass);
 
-        btnImportStl.setOnClickListener(v -> openStlLauncher.launch(new String[]{"*/*"}));
+        btnImportStl.setOnClickListener(v -> {
+            openStlLauncher.launch(new String[]{"*/*"});
+        });
 
         seekDensity.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
             @Override
@@ -91,6 +96,13 @@ public class MainActivity extends AppCompatActivity {
             }
             @Override
             public void onNothingSelected(AdapterView<?> parent) {
+            }
+        });
+
+        chkShowCenterOfMass.setOnCheckedChangeListener((buttonView, isChecked) -> {
+            if (graphView != null) {
+                graphView.getRenderer().setShowCenterOfMass(isChecked);
+                graphView.requestRender();
             }
         });
     }
@@ -144,6 +156,8 @@ public class MainActivity extends AppCompatActivity {
             txtImportStatus.setText("Seleção cancelada.");
             return;
         }
+
+        chkShowCenterOfMass.setChecked(false);
 
         askModelUnit(uri);
     }
@@ -204,12 +218,15 @@ public class MainActivity extends AppCompatActivity {
                     txtImportStatus.setText("Importação concluída com sucesso");
                     btnImportStl.setEnabled(true);
                     rawVolume = VolumeCalculator.computeVolume(mesh);
-                    rawVolume = VolumeCalculator.computeVolume(mesh);
+
                     rawCenterOfMass = MassCalculator.computeCenterOfMass(mesh);
+                    chkShowCenterOfMass.setVisibility(View.VISIBLE);
                     updateResults();
 
-                    
-                     sendMeshToRenderer(currentMesh);
+                    // Atualiza o renderizador com a malha e as coordenadas do Centro de Massa
+                    graphView.getRenderer().setCenterOfMass(rawCenterOfMass);
+                    graphView.getRenderer().setShowCenterOfMass(chkShowCenterOfMass.isChecked());
+                    sendMeshToRenderer(currentMesh);
                 });
 
             } catch (Exception e) {
