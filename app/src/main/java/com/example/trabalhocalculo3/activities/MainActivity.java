@@ -1,7 +1,8 @@
-package com.example.trabalhocalculo3.util;
+package com.example.trabalhocalculo3.activities;
 
 import static com.example.trabalhocalculo3.mathMotor.ConvertUnits.convertDensity;
 import static com.example.trabalhocalculo3.mathMotor.ConvertUnits.convertVolume;
+import static com.example.trabalhocalculo3.mathMotor.InertiaCalculator.computeInertiaTensor;
 
 import android.os.Bundle;
 
@@ -19,6 +20,7 @@ import androidx.appcompat.app.AppCompatActivity;
 import android.net.Uri;
 
 import com.example.trabalhocalculo3.R;
+import com.example.trabalhocalculo3.mathMotor.CalculationResult;
 import com.example.trabalhocalculo3.mathMotor.MassCalculator;
 import com.example.trabalhocalculo3.mathMotor.VolumeCalculator;
 import com.example.trabalhocalculo3.mesh.Mesh3D;
@@ -28,14 +30,15 @@ import java.io.InputStream;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import com.example.trabalhocalculo3.graphics.GraphSurfaceView;
+import com.example.trabalhocalculo3.util.ResultFormatter;
+import com.example.trabalhocalculo3.util.Unit;
+import com.example.trabalhocalculo3.util.UnitSelectionDialog;
 
 
 public class MainActivity extends AppCompatActivity {
     private TextView txtDensityLabel;
     private TextView txtResults;
     private double density = 1.0;
-    private double rawVolume = 1.0;
-    private double mass = 0.0;
     private Button btnImportStl;
     private TextView txtImportStatus;
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
@@ -47,7 +50,7 @@ public class MainActivity extends AppCompatActivity {
     private Unit displayUnit = Unit.MILLIMETER; // unidade mostrada; pode ser alterada pelo usuário
     private GraphSurfaceView graphView;
     private CheckBox chkShowCenterOfMass;
-    private double[] rawCenterOfMass = new double[]{0, 0, 0};
+    private CalculationResult currentResult = new CalculationResult();
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -118,31 +121,15 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void updateResults() {
-        double displayedVolume = convertVolume(
-                rawVolume,
-                modelUnit,
-                displayUnit
-        );
+        // Se já houver uma malha carregada, recalcula a massa e o tensor com a densidade atual
+        if (currentMesh != null) {
+            double mass = currentResult.getRawVolume() * density;
+            currentResult.setMass(mass);
+            currentResult.setInertiaTensor(computeInertiaTensor(currentMesh, density, currentResult.getRawCenterOfMass()));
+        }
 
-        double displayedDensity = convertDensity(
-                density,
-                modelUnit,
-                displayUnit
-        );
-
-        mass = rawVolume * density;
-
-        // Conversão das coordenadas do Centro de Massa para a unidade selecionada
-        double factor = modelUnit.getMetersPerUnit() / displayUnit.getMetersPerUnit();
-        double cmX = rawCenterOfMass[0] * factor;
-        double cmY = rawCenterOfMass[1] * factor;
-        double cmZ = rawCenterOfMass[2] * factor;
-
-        txtDensityLabel.setText(String.format("Densidade (kg/%s): %.6f",
-                displayUnit.getVolumeSymbol(), displayedDensity));
-
-        txtResults.setText(String.format("Volume: %.9f %s\nMassa: %.2f kg\nCentro de massa: (%.2f, %.2f, %.2f) %s",
-                displayedVolume, displayUnit.getVolumeSymbol(), mass, cmX, cmY, cmZ, displayUnit.getSymbol()));
+        txtDensityLabel.setText(ResultFormatter.formatDensityLabel(density, modelUnit, displayUnit));
+        txtResults.setText(ResultFormatter.formatResults(currentResult, modelUnit, displayUnit));
     }
 
     @Override
@@ -156,45 +143,14 @@ public class MainActivity extends AppCompatActivity {
             txtImportStatus.setText("Seleção cancelada.");
             return;
         }
-
         chkShowCenterOfMass.setChecked(false);
 
-        askModelUnit(uri);
-    }
-
-    private void askModelUnit(Uri uri) {
-        String[] units = {
-                "Milímetros (mm)",
-                "Centímetros (cm)",
-                "Metros (m)"
-        };
-
-        new androidx.appcompat.app.AlertDialog.Builder(this)
-                .setTitle("Em qual unidade o arquivo STL foi criado?")
-                .setSingleChoiceItems(units, 0, null)
-                .setPositiveButton("Confirmar", (dialog, which) -> {
-
-                    int selectedPosition = ((androidx.appcompat.app.AlertDialog) dialog).getListView().getCheckedItemPosition();
-
-                    switch (selectedPosition) {
-                        case 0:
-                            modelUnit = Unit.MILLIMETER;
-                            break;
-                        case 1:
-                            modelUnit = Unit.CENTIMETER;
-                            break;
-                        case 2:
-                            modelUnit = Unit.METER;
-                            break;
-                    }
-
-                    displayUnit = modelUnit;
-                    spinner.setSelection(selectedPosition);
-
-                    importStl(uri);
-                })
-                .setNegativeButton("Cancelar", null)
-                .show();
+        UnitSelectionDialog.show(this, (selectedUnit, position) -> {
+            modelUnit = selectedUnit;
+            displayUnit = selectedUnit;
+            spinner.setSelection(position);
+            importStl(uri);
+        });
     }
 
     private void importStl(Uri uri) {
@@ -217,14 +173,22 @@ public class MainActivity extends AppCompatActivity {
                 runOnUiThread(() -> {
                     txtImportStatus.setText("Importação concluída com sucesso");
                     btnImportStl.setEnabled(true);
-                    rawVolume = VolumeCalculator.computeVolume(mesh);
 
-                    rawCenterOfMass = MassCalculator.computeCenterOfMass(mesh);
+                    double rawVolume = VolumeCalculator.computeVolume(mesh);
+                    double[] centerOfMass = MassCalculator.computeCenterOfMass(mesh);
+                    double mass = rawVolume * density;
+
+                    currentResult.setRawVolume(rawVolume);
+                    currentResult.setRawCenterOfMass(centerOfMass);
+                    currentResult.setMass(mass);
+                    currentResult.setInertiaTensor(computeInertiaTensor(mesh, density, centerOfMass));
+
                     chkShowCenterOfMass.setVisibility(View.VISIBLE);
+
                     updateResults();
 
                     // Atualiza o renderizador com a malha e as coordenadas do Centro de Massa
-                    graphView.getRenderer().setCenterOfMass(rawCenterOfMass);
+                    graphView.getRenderer().setCenterOfMass(currentResult.getRawCenterOfMass());
                     graphView.getRenderer().setShowCenterOfMass(chkShowCenterOfMass.isChecked());
                     sendMeshToRenderer(currentMesh);
                 });

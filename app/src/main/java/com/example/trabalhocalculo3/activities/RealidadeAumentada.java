@@ -1,4 +1,4 @@
-package com.example.trabalhocalculo3.util;
+package com.example.trabalhocalculo3.activities;
 
 import android.Manifest;
 import android.app.Activity;

@@ -22,7 +22,7 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.TrabalhoCalculo3">
         <activity
-            android:name=".util.InicioActivity"
+            android:name=".activities.InicioActivity"
             android:exported="true"
             android:windowSoftInputMode="adjustResize">
             <intent-filter>
@@ -32,7 +32,7 @@
             </intent-filter>
         </activity>
         <activity
-            android:name=".util.MainActivity"
+            android:name=".activities.MainActivity"
             android:exported="false"
             android:windowSoftInputMode="adjustResize" />
 
@@ -41,7 +41,7 @@
             android:value="optional" />
 
         <activity
-            android:name=".util.RealidadeAumentada"
+            android:name=".activities.RealidadeAumentada"
             android:exported="false"
             android:windowSoftInputMode="adjustResize" />
     </application>
