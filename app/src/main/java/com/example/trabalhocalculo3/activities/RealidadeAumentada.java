@@ -11,17 +11,18 @@ import android.opengl.Matrix;
 import android.os.Bundle;
 import android.view.Gravity;
 import android.view.MotionEvent;
+import android.view.ScaleGestureDetector;
 import android.widget.FrameLayout;
 import android.widget.TextView;
 import android.widget.Toast;
 import android.widget.Button;
 import android.widget.LinearLayout;
-import android.widget.SeekBar;
 import android.net.Uri;
 import android.view.ViewConfiguration;
 import androidx.activity.result.ActivityResultLauncher;
 import androidx.activity.result.contract.ActivityResultContracts;
 import com.example.trabalhocalculo3.mesh.Mesh3D;
+import com.example.trabalhocalculo3.graphics.ModelShaders;
 import com.example.trabalhocalculo3.mesh.MeshImporter;
 import java.io.InputStream;
 import java.util.concurrent.ExecutorService;
@@ -68,7 +69,8 @@ public class RealidadeAumentada extends AppCompatActivity {
     private boolean importing;
     private float touchStartX, touchStartY;
     private boolean moved;
-    private SeekBar sizeControl, rotationControl;
+    private float lastTouchX;
+    private boolean multiTouch;
     private final ActivityResultLauncher<String[]> openStl = registerForActivityResult(
             new ActivityResultContracts.OpenDocument(), uri -> {
                 if (uri == null) return;
@@ -105,16 +107,26 @@ public class RealidadeAumentada extends AppCompatActivity {
                 }
                 if (!(mesh.getBoundingRadius() > 0))
                     throw new IllegalArgumentException("O modelo não possui dimensões válidas.");
+                float[] sourceNormals = mesh.getNormals();
+                float[] normals = new float[positions.length];
+                if (sourceNormals == null || sourceNormals.length != positions.length)
+                    throw new IllegalArgumentException("O modelo não possui normais válidas.");
+                for (int i = 0; i < normals.length; i += 3) {
+                    normals[i] = sourceNormals[i];
+                    normals[i + 1] = sourceNormals[i + 2];
+                    normals[i + 2] = -sourceNormals[i + 1];
+                }
                 FloatBuffer data = ArRenderer.buffer(positions);
+                FloatBuffer normalData = ArRenderer.buffer(normals);
                 runOnUiThread(() -> {
                     if (isFinishing() || isDestroyed()) return;
-                    surfaceView.queueEvent(() -> renderer.setModel(data, positions.length / 3));
+                    surfaceView.queueEvent(() -> renderer.setModel(data, normalData, positions.length / 3));
                     hasModel = true;
                     importing = false;
                     importButton.setEnabled(true);
-                    sizeControl.setProgress(100);
-                    rotationControl.setProgress(0);
-                    instructions.setText("STL importado em tamanho real. Mova o celular e toque em uma superfície para posicionar.");
+                    renderer.modelScale = 1f;
+                    renderer.modelRotation = 0f;
+                    instructions.setText("STL importado em tamanho real. Toque em uma superfície para posicionar. Use pinça para ampliar e arraste para girar.");
                 });
             } catch (Exception e) {
                 runOnUiThread(() -> {
@@ -178,38 +190,6 @@ public class RealidadeAumentada extends AppCompatActivity {
         trackingStatus.setPadding(8, 8, 8, 8);
         controls.addView(trackingStatus);
         controls.addView(importButton);
-        TextView sizeLabel = new TextView(this);
-        sizeLabel.setTextColor(Color.WHITE);
-        sizeLabel.setText("Tamanho: 100% (escala real)");
-        controls.addView(sizeLabel);
-        sizeControl = new SeekBar(this);
-        sizeControl.setMax(200);
-        sizeControl.setProgress(100);
-        controls.addView(sizeControl);
-        TextView rotationLabel = new TextView(this);
-        rotationLabel.setTextColor(Color.WHITE);
-        rotationLabel.setText("Rotação: 0°");
-        controls.addView(rotationLabel);
-        rotationControl = new SeekBar(this);
-        rotationControl.setMax(360);
-        controls.addView(rotationControl);
-        sizeControl.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
-            public void onProgressChanged(SeekBar bar, int value, boolean user) {
-                float scale = (float) Math.pow(10, (value - 100) / 100.0);
-                renderer.modelScale = scale;
-                sizeLabel.setText(String.format(java.util.Locale.getDefault(), "Tamanho: %.0f%%", scale * 100));
-            }
-            public void onStartTrackingTouch(SeekBar bar) {}
-            public void onStopTrackingTouch(SeekBar bar) {}
-        });
-        rotationControl.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
-            public void onProgressChanged(SeekBar bar, int value, boolean user) {
-                renderer.modelRotation = value;
-                rotationLabel.setText("Rotação: " + value + "°");
-            }
-            public void onStartTrackingTouch(SeekBar bar) {}
-            public void onStopTrackingTouch(SeekBar bar) {}
-        });
         root.addView(controls, new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM));
         root.setOnApplyWindowInsetsListener((v, insets) -> {
@@ -219,19 +199,38 @@ public class RealidadeAumentada extends AppCompatActivity {
         });
         setContentView(root);
 
+        ScaleGestureDetector scaleDetector = new ScaleGestureDetector(this,
+                new ScaleGestureDetector.SimpleOnScaleGestureListener() {
+                    @Override
+                    public boolean onScale(ScaleGestureDetector detector) {
+                        if (hasModel && !importing)
+                            setModelScale(renderer.modelScale * detector.getScaleFactor());
+                        return true;
+                    }
+                });
         surfaceView.setOnTouchListener((view, event) -> {
+            scaleDetector.onTouchEvent(event);
             switch (event.getActionMasked()) {
                 case MotionEvent.ACTION_DOWN:
                     touchStartX = event.getX();
                     touchStartY = event.getY();
                     moved = false;
+                    multiTouch = false;
+                    lastTouchX = event.getX();
                     break;
                 case MotionEvent.ACTION_POINTER_DOWN:
+                    multiTouch = true;
                     moved = true;
                     break;
                 case MotionEvent.ACTION_MOVE:
                     if (Math.hypot(event.getX() - touchStartX, event.getY() - touchStartY)
                             > ViewConfiguration.get(this).getScaledTouchSlop()) moved = true;
+                    if (moved && !multiTouch && hasModel && !importing) {
+                        float rotation = (renderer.modelRotation
+                                + (event.getX() - lastTouchX) * 0.5f + 360f) % 360f;
+                        renderer.modelRotation = rotation;
+                    }
+                    lastTouchX = event.getX();
                     break;
                 case MotionEvent.ACTION_UP:
                     if (!moved && hasModel && !importing) {
@@ -246,6 +245,10 @@ public class RealidadeAumentada extends AppCompatActivity {
             }
             return true;
         });
+    }
+
+    private void setModelScale(float scale) {
+        renderer.modelScale = Math.max(0.01f, Math.min(100f, scale));
     }
 
     @Override
@@ -374,11 +377,14 @@ public class RealidadeAumentada extends AppCompatActivity {
         private int cameraPosition;
         private int cameraTexCoord;
         private int objectPosition;
+        private int objectNormal;
+        private int mvLocation;
         private int mvpLocation;
 
         private FloatBuffer quadBuffer;
         private FloatBuffer texBuffer;
         private FloatBuffer modelBuffer;
+        private FloatBuffer normalBuffer;
         volatile float modelScale = 1f;
         volatile float modelRotation;
         private volatile boolean cameraFailed;
@@ -458,8 +464,9 @@ public class RealidadeAumentada extends AppCompatActivity {
             this.geometryChanged = true;
         }
 
-        void setModel(FloatBuffer data, int count) {
+        void setModel(FloatBuffer data, FloatBuffer normals, int count) {
             modelBuffer = data;
+            normalBuffer = normals;
             modelVertexCount = count;
             tapPending = false;
             if (anchor != null) anchor.detach();
@@ -496,21 +503,7 @@ public class RealidadeAumentada extends AppCompatActivity {
                             + "void main(){fragColor=texture(uTexture,vTexCoord);}"
             );
 
-            objectProgram = createProgram(
-                    "#version 300 es\n"
-                            + "in vec3 aPosition;\n"
-                            + "uniform mat4 uMVP;\n"
-                            + "out vec3 vPosition;\n"
-                            + "void main(){vPosition=aPosition;gl_Position=uMVP*vec4(aPosition,1.0);}",
-
-                    "#version 300 es\n"
-                            + "precision mediump float;\n"
-                            + "out vec4 fragColor;\n"
-                            + "in vec3 vPosition;\n"
-                            + "void main(){vec3 n=normalize(cross(dFdx(vPosition),dFdy(vPosition)));"
-                            + "float light=0.35+0.65*abs(dot(n,normalize(vec3(0.3,0.8,0.5))));"
-                            + "fragColor=vec4(vec3(0.1,0.8,0.3)*light,1.0);}"
-            );
+            objectProgram = createProgram(ModelShaders.VERTEX, ModelShaders.FRAGMENT);
 
             cameraPosition = GLES30.glGetAttribLocation(
                     cameraProgram, "aPosition");
@@ -519,8 +512,10 @@ public class RealidadeAumentada extends AppCompatActivity {
 
             objectPosition = GLES30.glGetAttribLocation(
                     objectProgram, "aPosition");
+            objectNormal = GLES30.glGetAttribLocation(objectProgram, "aNormal");
+            mvLocation = GLES30.glGetUniformLocation(objectProgram, "uMVMatrix");
             mvpLocation = GLES30.glGetUniformLocation(
-                    objectProgram, "uMVP");
+                    objectProgram, "uMVPMatrix");
 
             quadBuffer = buffer(QUAD);
             texBuffer = buffer(TEX);
@@ -598,7 +593,7 @@ public class RealidadeAumentada extends AppCompatActivity {
                 if (camera.getTrackingState() == TrackingState.TRACKING) {
                     reportStatus(anchor == null
                             ? "Rastreamento pronto. Toque na imagem para posicionar o STL."
-                            : "Objeto posicionado. Toque para mover; use os controles para ajustar.");
+                            : "Pinça: ampliar/reduzir • Arraste: girar • Toque: mover. Aproxime-se para ver os detalhes.");
                 } else {
                     reportStatus(trackingMessage(camera));
                 }
@@ -727,7 +722,7 @@ public class RealidadeAumentada extends AppCompatActivity {
                     viewMatrix, 0);
 
             frame.getCamera().getProjectionMatrix(
-                    projection, 0, 0.1f, 100f);
+                    projection, 0, 0.01f, 100f);
 
             Matrix.multiplyMM(
                     mv, 0, viewMatrix, 0, model, 0);
@@ -738,6 +733,13 @@ public class RealidadeAumentada extends AppCompatActivity {
             GLES30.glUniformMatrix4fv(
                     mvpLocation, 1, false, mvp, 0);
 
+            GLES30.glUniformMatrix4fv(mvLocation, 1, false, mv, 0);
+            GLES30.glUniform3f(GLES30.glGetUniformLocation(objectProgram, "uColor"),
+                    0.20f, 0.62f, 0.95f);
+            GLES30.glUniform1f(GLES30.glGetUniformLocation(objectProgram, "uAlpha"), 1f);
+            GLES30.glEnableVertexAttribArray(objectNormal);
+            GLES30.glVertexAttribPointer(objectNormal, 3, GLES30.GL_FLOAT,
+                    false, 0, normalBuffer);
             GLES30.glEnableVertexAttribArray(objectPosition);
             GLES30.glVertexAttribPointer(
                     objectPosition, 3, GLES30.GL_FLOAT,
@@ -748,6 +750,7 @@ public class RealidadeAumentada extends AppCompatActivity {
                     modelVertexCount);
 
             GLES30.glDisableVertexAttribArray(objectPosition);
+            GLES30.glDisableVertexAttribArray(objectNormal);
         }
 
         private static FloatBuffer buffer(float[] data) {
